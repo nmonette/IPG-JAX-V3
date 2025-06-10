@@ -264,11 +264,15 @@ def make_train(config):
 
             grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
             total_loss, grads = grad_fn(train_state.params)
-            train_state = train_state.apply_gradients(grads=grads)
+            old_params = train_state.params
+            train_state = train_state.apply_gradients(grads=grads, team=True)
 
             loss_info = {
                 "loss": total_loss[0],
                 "entropy": total_loss[1][1],
+                "adv_optimality": optax.tree_utils.tree_sum(jax.tree_util.tree_map(
+                    lambda old, new: jnp.linalg.norm(old - new), old_params, train_state.params
+                ))
             }
 
             return train_state, loss_info
@@ -294,11 +298,15 @@ def make_train(config):
 
             grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
             total_loss, grads = grad_fn(train_state.params)
+            old_params = train_state.params
             train_state = train_state.apply_gradients(grads=grads, team=True)
 
             loss_info = {
                 "loss": total_loss[0],
                 "entropy": total_loss[1][1],
+                "team_optimality": optax.tree_utils.tree_sum(jax.tree_util.tree_map(
+                    lambda old, new: jnp.linalg.norm(old - new), old_params, train_state.params
+                ))
             }
 
             return train_state, loss_info
@@ -320,8 +328,10 @@ def make_train(config):
             loss_info = {
                 "adv_loss": adv_loss_info["loss"][-1],
                 "adv_entropy": adv_loss_info["entropy"][-1],
+                "adv_optimality": adv_loss_info["adv_optimality"][-1],
                 "team_loss": team_loss_info["loss"],
-                "team_entropy": team_loss_info["entropy"]
+                "team_entropy": team_loss_info["entropy"],
+                "team_optimality": team_loss_info["team_optimality"],
             }
 
             return (rng, train_state), loss_info
@@ -357,15 +367,26 @@ def make_train(config):
         update = jax.jit(update_fn)
         gap_fn = jax.jit(nash_gap)
 
+        best_iterate = train_state
+        best_iterate_norm = jnp.inf
+
         for step in range(config["NUM_UPDATES"]):
             rng, _rng = jax.random.split(rng)
             (rng, train_state), loss_info = update(_rng, train_state)
 
+            if loss_info["team_optimality"] < best_iterate_norm:
+                best_iterate = train_state
+                best_iterate_norm = loss_info["team_optimality"]
+
             if step % config["EVAL_FREQ"] == 0:
                 rng, _rng = jax.random.split(rng)
-                gap = gap_fn(rng, train_state)
+                gap = gap_fn(_rng, train_state)
                 loss_info["nash_gap"] = gap
-                print(f"Step {step}: Nash Gap is {gap:.3f}")
+                
+                best_gap = gap_fn(_rng, best_iterate)
+                loss_info["best_iterate_nash_gap"] = best_gap
+
+                print(f"Step {step}: Nash Gap is {gap:.3f}, Best Iterate Nash Gap is {best_gap:.3f}")
                 wandb.log(loss_info)
 
         return train_state
