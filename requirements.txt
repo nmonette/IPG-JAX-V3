@@ -1,0 +1,4 @@
+jaxmarl
+wandb
+hydra-core
+distrax
